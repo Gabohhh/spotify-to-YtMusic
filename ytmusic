@@ -1,0 +1,479 @@
+import json
+import os
+import time
+import re
+import random
+import google_auth_oauthlib.flow
+import googleapiclient.discovery
+import googleapiclient.errors
+
+# Cache file for storing search results
+CACHE_FILE = "video_cache.json"
+
+def cargar_datos_playlist(nombre_archivo):
+    """
+    Carga los datos de canciones y la información de la playlist desde un archivo JSON o TXT.
+    """
+    canciones = []
+    info_playlist = None
+    
+    # Determinar el tipo de archivo
+    extension = nombre_archivo.split('.')[-1].lower()
+    
+    try:
+        if extension == 'json':
+            with open(nombre_archivo, 'r', encoding='utf-8') as f:
+                datos = json.load(f)
+            
+            # Verificar si es el formato con info_playlist y canciones
+            if isinstance(datos, dict) and "info_playlist" in datos and "canciones" in datos:
+                return datos["info_playlist"], datos["canciones"]
+            elif isinstance(datos, list):
+                # Es solo una lista de canciones
+                print("Formato de archivo detectado: lista de canciones sin info de playlist")
+                nombre_playlist = input("Introduce un nombre para la playlist de YouTube: ")
+                descripcion_playlist = input("Introduce una descripción (opcional): ")
+                return {"nombre": nombre_playlist, "descripcion": descripcion_playlist}, datos
+            else:
+                # Es un formato desconocido
+                print("Formato de archivo JSON no reconocido. Se solicitará información de la playlist.")
+                nombre_playlist = input("Introduce un nombre para la playlist de YouTube: ")
+                descripcion_playlist = input("Introduce una descripción (opcional): ")
+                
+                # Convertir los datos al formato esperado de canciones si es posible
+                canciones = []
+                if isinstance(datos, dict) and "tracks" in datos:
+                    # Posible formato de exportación de Spotify
+                    for track in datos["tracks"]:
+                        if "track" in track and "name" in track["track"] and "artists" in track["track"]:
+                            artist = track["track"]["artists"][0]["name"] if track["track"]["artists"] else "Unknown"
+                            song = track["track"]["name"]
+                            canciones.append({"busqueda": f"{song} {artist}"})
+                
+                return {"nombre": nombre_playlist, "descripcion": descripcion_playlist}, canciones
+                
+        elif extension == 'txt':
+            # Para archivos TXT, cada línea se considera una canción
+            with open(nombre_archivo, 'r', encoding='utf-8') as f:
+                lineas = f.readlines()
+            
+            for linea in lineas:
+                linea = linea.strip()
+                if linea:  # Ignorar líneas vacías
+                    canciones.append({"busqueda": linea})
+            
+            nombre_playlist = input("Introduce un nombre para la playlist de YouTube: ")
+            descripcion_playlist = input("Introduce una descripción (opcional): ")
+            return {"nombre": nombre_playlist, "descripcion": descripcion_playlist}, canciones
+            
+        else:
+            print(f"El formato de archivo {extension} no es compatible.")
+            return None, None
+    
+    except FileNotFoundError:
+        print(f"El archivo {nombre_archivo} no existe.")
+        return None, None
+    except json.JSONDecodeError:
+        print(f"El archivo {nombre_archivo} no tiene un formato JSON válido.")
+        return None, None
+    except Exception as e:
+        print(f"Error al cargar el archivo: {e}")
+        return None, None
+
+def configurar_youtube_api():
+    """
+    Configura y autentica con la API de YouTube.
+    """
+    # Verificar si existe un archivo de credenciales guardado
+    if os.path.exists('token.json'):
+        print("Usando credenciales guardadas de sesión anterior...")
+        try:
+            # Usar credenciales guardadas
+            flow = google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file(
+                'client_secret.json',
+                ['https://www.googleapis.com/auth/youtube']
+            )
+            credentials = flow.run_local_server(port=0)
+            
+            with open('token.json', 'w') as token:
+                token.write(credentials.to_json())
+                
+        except Exception as e:
+            print(f"Error al cargar credenciales guardadas: {e}")
+            # Si hay un error, eliminamos el token y reiniciamos el proceso
+            os.remove('token.json')
+            return configurar_youtube_api()
+    else:
+        print("Necesitas autenticarte con YouTube...")
+        print("1. Ve a https://console.cloud.google.com/")
+        print("2. Crea un nuevo proyecto o selecciona uno existente")
+        print("3. Habilita la API de YouTube Data API v3")
+        print("4. Crea credenciales OAuth 2.0 para aplicación de escritorio")
+        print("5. Descarga el archivo JSON y guárdalo como 'client_secret.json' en el mismo directorio que este script")
+        
+        input("Presiona Enter cuando hayas completado estos pasos...")
+        
+        # Verificar que el archivo existe
+        if not os.path.exists('client_secret.json'):
+            print("No se encontró el archivo client_secret.json. Por favor, sigue las instrucciones anteriores.")
+            return None
+        
+        # Autenticar con OAuth
+        flow = google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file(
+            'client_secret.json',
+            ['https://www.googleapis.com/auth/youtube']
+        )
+        credentials = flow.run_local_server(port=0)
+        
+        # Guardar las credenciales para la próxima vez
+        with open('token.json', 'w') as token:
+            token.write(credentials.to_json())
+    
+    # Crear el servicio de YouTube
+    youtube = googleapiclient.discovery.build(
+        'youtube', 'v3', credentials=credentials
+    )
+    
+    return youtube
+
+def crear_playlist_youtube(youtube, nombre_playlist, descripcion, privacidad="private"):
+    """
+    Crea una nueva playlist en YouTube.
+    """
+    request = youtube.playlists().insert(
+        part="snippet,status",
+        body={
+            "snippet": {
+                "title": nombre_playlist,
+                "description": descripcion,
+                "defaultLanguage": "es"
+            },
+            "status": {
+                "privacyStatus": privacidad  # Puede ser "public", "private" o "unlisted"
+            }
+        }
+    )
+    response = request.execute()
+    return response['id']
+
+def actualizar_privacidad_playlist(youtube, playlist_id, privacidad):
+    """
+    Actualiza el estado de privacidad de una playlist.
+    """
+    try:
+        request = youtube.playlists().update(
+            part="snippet,status",
+            body={
+                "id": playlist_id,
+                "snippet": {
+                    "title": "Título existente",  # Este valor se ignorará pero es necesario
+                    "description": "Descripción existente"  # Este valor se ignorará pero es necesario
+                },
+                "status": {
+                    "privacyStatus": privacidad
+                }
+            }
+        )
+        request.execute()
+        print(f"Estado de privacidad de la playlist actualizado a: {privacidad}")
+        return True
+    except googleapiclient.errors.HttpError as e:
+        print(f"Error al actualizar la privacidad de la playlist: {e}")
+        return False
+
+def cargar_cache():
+    """
+    Carga el cache de búsquedas anteriores.
+    """
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            print("Error al cargar el cache. Creando un nuevo cache.")
+    return {}
+
+def guardar_cache(cache):
+    """
+    Guarda el cache de búsquedas.
+    """
+    with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(cache, f, ensure_ascii=False, indent=4)
+
+def buscar_video_youtube(youtube, query, cache):
+    """
+    Busca un video en YouTube usando el cache primero.
+    """
+    # Normalizar la consulta para mejorar la consistencia del cache
+    query_normalizada = query.lower().strip()
+    
+    # Verificar primero en el cache
+    if query_normalizada in cache:
+        print(f"Cache hit: {query}")
+        return cache[query_normalizada]
+    
+    # Implementar exponential backoff
+    max_intentos = 5
+    for intento in range(max_intentos):
+        try:
+            request = youtube.search().list(
+                part="snippet",
+                maxResults=1,
+                q=query,
+                type="video"
+            )
+            response = request.execute()
+            
+            if response['items']:
+                video_id = response['items'][0]['id']['videoId']
+                # Guardar en cache
+                cache[query_normalizada] = video_id
+                return video_id
+            return None
+            
+        except googleapiclient.errors.HttpError as e:
+            if e.resp.status in [403, 429]:  # Límite de cuota o demasiadas solicitudes
+                # Calcular tiempo de espera con retroceso exponencial (entre 1 y 60 segundos)
+                wait_time = min(60, (2 ** intento) + random.uniform(0, 1))
+                print(f"Límite de API alcanzado. Esperando {wait_time:.1f} segundos (intento {intento+1}/{max_intentos})...")
+                time.sleep(wait_time)
+                if intento == max_intentos - 1:
+                    print("Número máximo de intentos alcanzado. Intentando método alternativo...")
+                    return None
+            else:
+                print(f"Error HTTP: {e}")
+                return None
+        except Exception as e:
+            print(f"Error al buscar video: {e}")
+            return None
+    
+    return None
+
+def agregar_videos_a_playlist_batch(youtube, playlist_id, videos):
+    """
+    Agrega múltiples videos a la playlist en una sola sesión.
+    """
+    if not videos:
+        return []
+    
+    resultados = []
+    
+    for video_id in videos:
+        try:
+            request = youtube.playlistItems().insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "playlistId": playlist_id,
+                        "resourceId": {
+                            "kind": "youtube#video",
+                            "videoId": video_id
+                        }
+                    }
+                }
+            )
+            resultado = request.execute()
+            resultados.append(resultado)
+            time.sleep(0.5)  # Pequeña pausa entre operaciones
+            
+        except googleapiclient.errors.HttpError as e:
+            print(f"Error al añadir video {video_id}: {e}")
+            # Implementar retroceso exponencial aquí si es necesario
+            time.sleep(2)
+        except Exception as e:
+            print(f"Error general al añadir video {video_id}: {e}")
+            time.sleep(1)
+    
+    return resultados
+
+def procesar_playlist_optimizado(youtube, playlist_id, canciones, continuar_desde=0, lote_size=10):
+    """
+    Versión optimizada que procesa la lista de canciones usando cache y operaciones por lotes.
+    """
+    total_canciones = len(canciones)
+    canciones_a_procesar = canciones[continuar_desde:]
+    
+    # Inicializar contadores
+    canciones_encontradas = 0
+    canciones_no_encontradas = []
+    
+    # Cargar cache de búsquedas previas
+    cache = cargar_cache()
+    print(f"Cache cargado con {len(cache)} entradas previas")
+    
+    print(f"Procesando {len(canciones_a_procesar)} canciones de un total de {total_canciones}")
+    
+    # Procesar por lotes para mejor rendimiento
+    for i in range(0, len(canciones_a_procesar), lote_size):
+        lote_actual = canciones_a_procesar[i:i+lote_size]
+        print(f"\nProcesando lote {i//lote_size + 1} ({i+continuar_desde+1}-{min(i+lote_size+continuar_desde, total_canciones)})")
+        
+        # Lista para almacenar los IDs de videos de este lote
+        video_ids = []
+        queries_procesadas = []
+        
+        # Primero, buscar todos los videos (usando cache donde sea posible)
+        for j, cancion in enumerate(lote_actual):
+            indice_global = i + j + continuar_desde + 1
+            busqueda = cancion['busqueda'] if isinstance(cancion, dict) and 'busqueda' in cancion else cancion
+            print(f"Buscando {indice_global}/{total_canciones}: {busqueda}")
+            
+            video_id = buscar_video_youtube(youtube, busqueda, cache)
+            if video_id:
+                video_ids.append(video_id)
+                queries_procesadas.append((indice_global, busqueda, True))
+                canciones_encontradas += 1
+                print(f"✓ Encontrada: {busqueda}")
+            else:
+                queries_procesadas.append((indice_global, busqueda, False))
+                canciones_no_encontradas.append(busqueda)
+                print(f"✗ No encontrada: {busqueda}")
+        
+        # Guardar el cache después de cada lote de búsquedas
+        guardar_cache(cache)
+        
+        # Luego, agregar todos los videos encontrados a la playlist en lote
+        if video_ids:
+            print(f"\nAgregando {len(video_ids)} videos a la playlist...")
+            agregar_videos_a_playlist_batch(youtube, playlist_id, video_ids)
+            print(f"Videos agregados con éxito")
+        
+        # Guardar progreso después de cada lote
+        print(f"\nGuardando progreso... Añadidas {canciones_encontradas} de {i+len(lote_actual)+continuar_desde} procesadas")
+        
+        # Guardar lista actualizada de canciones no encontradas
+        with open("canciones_no_encontradas.txt", 'w', encoding='utf-8') as f:
+            for cancion in canciones_no_encontradas:
+                f.write(f"{cancion}\n")
+        
+        # Guardar punto de continuación
+        indice_maximo = i + len(lote_actual) + continuar_desde
+        with open("progreso_youtube.json", 'w', encoding='utf-8') as f:
+            json.dump({
+                "playlist_id": playlist_id,
+                "canciones_procesadas": indice_maximo,
+                "canciones_encontradas": canciones_encontradas,
+                "total_canciones": total_canciones
+            }, f, ensure_ascii=False, indent=4)
+        
+        print(f"Progreso guardado. Puedes reanudar desde la canción #{indice_maximo} si es necesario.")
+        
+        # Esperar un poco entre lotes para evitar problemas de cuota
+        if i + lote_size < len(canciones_a_procesar):
+            wait_time = random.uniform(2, 5)
+            print(f"Esperando {wait_time:.1f} segundos antes del siguiente lote...")
+            time.sleep(wait_time)
+    
+    return canciones_encontradas, len(canciones_no_encontradas)
+
+def main():
+    print("=== Creador de Playlists en YouTube (Versión Optimizada) ===")
+    print("Este script creará una playlist en YouTube basada en un archivo de canciones.")
+    print("Optimizado para reducir el uso de cuota de la API.")
+    
+    try:
+        # Cargar datos de la playlist
+        archivo_datos = input("Nombre del archivo de datos (TXT o JSON): ")
+        if not archivo_datos:
+            print("Debes proporcionar un nombre de archivo. Abortando.")
+            return
+            
+        info_playlist, canciones = cargar_datos_playlist(archivo_datos)
+        
+        if not info_playlist or not canciones:
+            print("No se pudieron cargar los datos de la playlist. Abortando.")
+            return
+        
+        # Verificar si hay un progreso guardado
+        continuar_desde = 0
+        playlist_id = None
+        if os.path.exists("progreso_youtube.json"):
+            try:
+                with open("progreso_youtube.json", 'r', encoding='utf-8') as f:
+                    progreso = json.load(f)
+                
+                print(f"\nSe encontró un progreso guardado:")
+                print(f"- Playlist ID: {progreso['playlist_id']}")
+                print(f"- Canciones procesadas: {progreso['canciones_procesadas']} de {progreso['total_canciones']}")
+                print(f"- Canciones añadidas: {progreso['canciones_encontradas']}")
+                
+                continuar = input("\n¿Deseas continuar desde este punto? (s/n): ").lower()
+                if continuar == 's':
+                    continuar_desde = progreso['canciones_procesadas']
+                    playlist_id = progreso['playlist_id']
+            except:
+                print("No se pudo cargar el archivo de progreso. Se iniciará desde el principio.")
+        
+        # Configurar la API de YouTube
+        youtube = configurar_youtube_api()
+        if not youtube:
+            print("No se pudo configurar la API de YouTube. Abortando.")
+            return
+        
+        # Tamaño de lote ajustable
+        try:
+            lote_size = int(input("Tamaño de lote para procesar canciones (recomendado: 5-10) [5]: ") or "5")
+        except ValueError:
+            lote_size = 5
+            print("Valor inválido. Usando tamaño de lote predeterminado: 5")
+        
+        # Preguntar por el estado de privacidad de la playlist
+        privacidad = "private"  # Valor por defecto
+        if continuar_desde == 0:
+            privacidad_input = input("¿Quieres que la playlist sea privada, pública o no listada? (privada/publica/no_listada) [privada]: ").lower()
+            if privacidad_input in ["publica", "pública", "public"]:
+                privacidad = "public"
+            elif privacidad_input in ["no_listada", "unlisted", "no listada"]:
+                privacidad = "unlisted"
+        
+        # Crear playlist si es necesario
+        if not playlist_id:
+            playlist_id = crear_playlist_youtube(youtube, info_playlist['nombre'], info_playlist['descripcion'], privacidad)
+            print(f"Playlist creada con ID: {playlist_id}")
+        else:
+            # Si estamos continuando, actualizar la privacidad si se desea
+            cambiar_privacidad = input("¿Deseas cambiar el estado de privacidad de la playlist? (s/n) [n]: ").lower()
+            if cambiar_privacidad == 's':
+                privacidad_input = input("¿Privada, pública o no listada? (privada/publica/no_listada): ").lower()
+                if privacidad_input in ["publica", "pública", "public"]:
+                    privacidad = "public"
+                elif privacidad_input in ["no_listada", "unlisted", "no listada"]:
+                    privacidad = "unlisted"
+                else:
+                    privacidad = "private"
+                
+                actualizar_privacidad_playlist(youtube, playlist_id, privacidad)
+        
+        # Procesar las canciones con el método optimizado
+        encontradas, no_encontradas = procesar_playlist_optimizado(
+            youtube,
+            playlist_id,
+            canciones,
+            continuar_desde=continuar_desde,
+            lote_size=lote_size
+        )
+        
+        print("\n=== Resumen ===")
+        print(f"Total de canciones procesadas: {len(canciones)}")
+        print(f"Canciones añadidas a YouTube: {encontradas}")
+        print(f"Canciones no encontradas: {no_encontradas}")
+        
+        if no_encontradas > 0:
+            print("\nRevisa el archivo 'canciones_no_encontradas.txt' para ver qué canciones no se pudieron transferir.")
+            print("Puedes intentar buscarlas manualmente en YouTube con términos de búsqueda diferentes.")
+        
+        # Limpiar archivo de progreso si se completó
+        if continuar_desde + encontradas + no_encontradas >= len(canciones):
+            if os.path.exists("progreso_youtube.json"):
+                os.remove("progreso_youtube.json")
+                print("\nProceso completado. Archivo de progreso eliminado.")
+        
+        print(f"\n¡Proceso completado! Tu playlist está disponible en: https://www.youtube.com/playlist?list={playlist_id}")
+        
+    except Exception as e:
+        print(f"Ocurrió un error: {e}")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    main()
