@@ -1,0 +1,135 @@
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
+import json
+import os
+import time
+
+def obtener_canciones_spotify():
+    """
+    Obtiene todas las canciones de una playlist específica de Spotify.
+    Requiere autenticación OAuth.
+    """
+    # Configuración de credenciales (necesitarás crear una app en Spotify Developer Dashboard)
+    client_id = "sacar de spotify developer"
+    client_secret = "lo mismo de arriba"
+    redirect_uri = "http://localhost:8888/callback"
+    scope = "user-library-read playlist-read-private"
+    
+    # Configurar la autenticación
+    sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
+        client_id=client_id,
+        client_secret=client_secret,
+        redirect_uri=redirect_uri,
+        scope=scope))
+    
+    # Solicitar el enlace o ID de la playlist
+    playlist_input = input("Ingresa el enlace o ID de la playlist de Spotify: ")
+    
+    # Extraer el ID si se proporciona un enlace completo
+    if "spotify.com/playlist/" in playlist_input:
+        playlist_id = playlist_input.split("playlist/")[1].split("?")[0]
+    else:
+        playlist_id = playlist_input
+    
+    print(f"Usando ID de playlist: {playlist_id}")
+    
+    # Obtener información de la playlist
+    playlist_info = sp.playlist(playlist_id)
+    playlist_nombre = playlist_info['name']
+    playlist_descripcion = playlist_info.get('description', '')
+    
+    results = sp.playlist_items(playlist_id)
+    canciones = []
+    
+    # Extraer los títulos y artistas de cada canción
+    for item in results['items']:
+        if item['track'] is None:
+            continue  # Saltar elementos sin track (puede ocurrir si hay canciones eliminadas)
+        track = item['track']
+        nombre_cancion = track['name']
+        artistas = [artista['name'] for artista in track['artists']]
+        artista_principal = artistas[0]
+        
+        info_cancion = {
+            "titulo": nombre_cancion,
+            "artista": artista_principal,
+            "busqueda": f"{nombre_cancion} - {artista_principal}"
+        }
+        canciones.append(info_cancion)
+    
+    # Obtener más canciones si hay paginación (importante para playlists grandes)
+    while results['next']:
+        results = sp.next(results)
+        for item in results['items']:
+            if item['track'] is None:
+                continue
+            track = item['track']
+            nombre_cancion = track['name']
+            artistas = [artista['name'] for artista in track['artists']]
+            artista_principal = artistas[0]
+            
+            info_cancion = {
+                "titulo": nombre_cancion,
+                "artista": artista_principal,
+                "busqueda": f"{nombre_cancion} - {artista_principal}"
+            }
+            canciones.append(info_cancion)
+        
+        # Mostrar progreso
+        print(f"Canciones obtenidas hasta ahora: {len(canciones)}")
+        # Pequeña pausa para evitar limitaciones de API
+        time.sleep(0.5)
+    
+    return canciones, playlist_nombre, playlist_descripcion
+
+def guardar_en_archivo(canciones, playlist_info, nombre_archivo="spotify_playlist.json"):
+    """
+    Guarda la lista de canciones y la información de la playlist en un archivo JSON.
+    """
+    playlist_nombre, playlist_descripcion = playlist_info
+    
+    datos_completos = {
+        "info_playlist": {
+            "nombre": playlist_nombre,
+            "descripcion": playlist_descripcion
+        },
+        "canciones": canciones
+    }
+    
+    with open(nombre_archivo, 'w', encoding='utf-8') as f:
+        json.dump(datos_completos, f, ensure_ascii=False, indent=4)
+    
+    print(f"Se han guardado {len(canciones)} canciones en {nombre_archivo}")
+    
+    # También crear un archivo de texto simple para facilitar la búsqueda manual
+    with open("canciones_para_buscar.txt", 'w', encoding='utf-8') as f:
+        for cancion in canciones:
+            f.write(f"{cancion['busqueda']}\n")
+    
+    print(f"Se ha creado también un archivo de texto con los términos de búsqueda")
+
+def main():
+    print("=== Extractor de Playlists de Spotify ===")
+    print("Este script escaneará tu playlist de Spotify y guardará todas las canciones en un archivo.")
+    print("Necesitarás configurar tus credenciales de Spotify primero.")
+    
+    try:
+        # Obtener canciones de Spotify
+        canciones, playlist_nombre, playlist_descripcion = obtener_canciones_spotify()
+        
+        # Guardar en archivo
+        guardar_en_archivo(canciones, (playlist_nombre, playlist_descripcion))
+        
+        print("\n=== Resumen ===")
+        print(f"Nombre de la playlist: {playlist_nombre}")
+        print(f"Total de canciones extraídas: {len(canciones)}")
+        print(f"Los datos se han guardado en 'spotify_playlist.json'")
+        print("\nPuedes usar ahora el script 'ytmusic_creator.py' para crear esta playlist en YouTube Music.")
+        
+    except Exception as e:
+        print(f"Ocurrió un error: {e}")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    main()
